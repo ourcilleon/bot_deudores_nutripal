@@ -1,10 +1,21 @@
+import os
 import telebot
 from telebot import types
 import requests
 
-# --- CONFIGURACIÓN ---
-TELEGRAM_TOKEN = '8861738923:AAHnwfKxw5HJBMBEHE23wuKB9kIKWINAYHc'
-APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyBdAacHswKS-vuqUB8x7LeQPYQoYNuZCXeRom3AeoBsoZJLGtQLVUZ2RS_pz_NVV8iwg/exec'
+# --- LECTURA DE VARIABLES DE ENTORNO DESDE RENDER ---
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
+APPS_SCRIPT_URL = os.environ.get('APPS_SCRIPT_URL')
+
+# Configuración opcional de usuarios autorizados (separa IDs por coma en Render: ALLOWED_USERS)
+allowed_users_raw = os.environ.get('ALLOWED_USERS', '')
+ALLOWED_USERS = [int(uid.strip()) for uid in allowed_users_raw.split(',') if uid.strip().isdigit()]
+
+# Verificación inicial en logs de Render
+if not TELEGRAM_TOKEN:
+    print("❌ ERROR CRÍTICO: La variable 'TELEGRAM_TOKEN' no está configurada en Render.")
+if not APPS_SCRIPT_URL:
+    print("❌ ERROR CRÍTICO: La variable 'APPS_SCRIPT_URL' no está configurada en Render.")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
@@ -35,6 +46,13 @@ def menu_principal():
     btn_cancelar = types.KeyboardButton("❌ Cancelar")
     markup.add(btn_nuevo, btn_abono, btn_saldo, btn_cancelar)
     return markup
+
+# --- FILTRO DE SEGURIDAD PRIVADA (Si configuraste ALLOWED_USERS en Render) ---
+@bot.message_handler(func=lambda message: len(ALLOWED_USERS) > 0 and message.from_user.id not in ALLOWED_USERS)
+def acceso_denegado(message):
+    bot.reply_to(message, "⛔ *Acceso denegado.* Este bot es privado y no estás autorizado para usarlo.", parse_mode="Markdown")
+
+# --- COMANDOS Y ATENCIÓN DE MENSAJES ---
 
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
@@ -146,5 +164,5 @@ def procesar_pasos(message):
             bot.send_message(chat_id, f"❌ No se encontró al deudor *{nombre}*.", reply_markup=menu_principal())
         user_states.pop(chat_id, None)
 
-print("Bot en ejecución con validación numéricas estrictas...")
+print("Iniciando bot con variables de entorno de Render...")
 bot.infinity_polling()
