@@ -1,60 +1,62 @@
 import os
+import json
 import threading
+import requests
+import telebot
+from telebot import types
 from flask import Flask
 
-# Servidor web dummy para que Render detecte un puerto abierto
+# --- SERVIDOR FLASK PARA RENDER ---
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot de Telegram activo."
+    return "Bot de Telegram activo y corriendo."
 
 def run_http():
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
-# Iniciar servidor web en segundo plano
 threading.Thread(target=run_http, daemon=True).start()
-import os
-import telebot
-from telebot import types
-import requests
 
-# --- LECTURA DE VARIABLES DE ENTORNO DESDE RENDER ---
+# --- CONFIGURACIÓN Y VARIABLES DE ENTORNO ---
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 APPS_SCRIPT_URL = os.environ.get('APPS_SCRIPT_URL')
 
-# Configuración opcional de usuarios autorizados (separa IDs por coma en Render: ALLOWED_USERS)
 allowed_users_raw = os.environ.get('ALLOWED_USERS', '')
 ALLOWED_USERS = [int(uid.strip()) for uid in allowed_users_raw.split(',') if uid.strip().isdigit()]
 
-# Verificación inicial en logs de Render
 if not TELEGRAM_TOKEN:
-    print("❌ ERROR CRÍTICO: La variable 'TELEGRAM_TOKEN' no está configurada en Render.")
+    print("❌ ERROR CRÍTICO: 'TELEGRAM_TOKEN' no configurado.")
 if not APPS_SCRIPT_URL:
-    print("❌ ERROR CRÍTICO: La variable 'APPS_SCRIPT_URL' no está configurada en Render.")
+    print("❌ ERROR CRÍTICO: 'APPS_SCRIPT_URL' no configurado.")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-
-# Diccionario para almacenar el estado del usuario
 user_states = {}
 
-# Formateador de pesos chilenos
+def enviar_a_sheets(datos):
+    headers = {'Content-Type': 'application/json'}
+    try:
+        respuesta = requests.post(
+            APPS_SCRIPT_URL, 
+            data=json.dumps(datos), 
+            headers=headers, 
+            timeout=15
+        )
+        return respuesta.json()
+    except Exception as e:
+        print(f"❌ Error al conectar con Google Sheets: {e}")
+        return {"status": "error", "message": str(e)}
+
 def formato_clp(monto):
     return f"${int(monto):,}".replace(",", ".")
 
-# Validación estricta para asegurar que el monto solo contenga números
 def extraer_monto_valido(texto):
-    # Quitamos espacios, signos de peso y puntos de formato miles
     texto_limpio = texto.strip().replace(".", "").replace(",", "").replace("$", "")
-    
-    # Es obligatorio que contenga solo dígitos
     if not texto_limpio.isdigit():
         return None
-    
     return int(texto_limpio)
 
-# Menú principal con botones
 def menu_principal():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     btn_nuevo = types.KeyboardButton("➕ Agregar Deudor")
@@ -64,12 +66,9 @@ def menu_principal():
     markup.add(btn_nuevo, btn_abono, btn_saldo, btn_cancelar)
     return markup
 
-# --- FILTRO DE SEGURIDAD PRIVADA (Si configuraste ALLOWED_USERS en Render) ---
 @bot.message_handler(func=lambda message: len(ALLOWED_USERS) > 0 and message.from_user.id not in ALLOWED_USERS)
 def acceso_denegado(message):
-    bot.reply_to(message, "⛔ *Acceso denegado.* Este bot es privado y no estás autorizado para usarlo.", parse_mode="Markdown")
-
-# --- COMANDOS Y ATENCIÓN DE MENSAJES ---
+    bot.reply_to(message, "⛔ *Acceso denegado.* Este bot es privado.", parse_mode="Markdown")
 
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
@@ -86,7 +85,6 @@ def cancelar(message):
     bot.send_message(message.chat.id, "Operación cancelada. ¿Qué deseas hacer?", reply_markup=menu_principal())
 
 # --- PASO 1: INICIO DE FLUJOS ---
-
 @bot.message_handler(func=lambda m: m.text == "➕ Agregar Deudor" or m.text == "/nuevo")
 def inicio_nuevo(message):
     user_states[message.chat.id] = {'step': 'nuevo_nombre'}
@@ -102,54 +100,49 @@ def inicio_saldo(message):
     user_states[message.chat.id] = {'step': 'saldo_nombre'}
     bot.send_message(message.chat.id, "🔍 Ingresa el *Nombre y Apellido* del deudor a consultar:", parse_mode="Markdown")
 
-# --- PASO 2: PROCESAMIENTO PASO A PASO CON VALIDACIÓN NUMÉRICA ---
-
+# --- PASO 2: PROCESAMIENTO ---
 @bot.message_handler(func=lambda message: message.chat.id in user_states)
 def procesar_pasos(message):
     chat_id = message.chat.id
     state = user_states.get(chat_id, {})
     step = state.get('step')
 
-    # 1. Flujo Nuevo Deudor
     if step == 'nuevo_nombre':
         user_states[chat_id] = {'step': 'nuevo_monto', 'nombre': message.text.strip()}
-        bot.send_message(chat_id, f"Monto de la deuda inicial para *{message.text.strip()}* (ingresa solo el valor numérico, ej: 150000):", parse_mode="Markdown")
+        bot.send_message(chat_id, f"Monto de la deuda inicial para *{message.text.strip()}* (solo números, ej: 150000):", parse_mode="Markdown")
         return
 
     if step == 'nuevo_monto':
         monto = extraer_monto_valido(message.text)
-        
         if monto is None or monto <= 0:
-            bot.send_message(chat_id, "⚠️ **Entrada inválida.** El monto debe contener **únicamente números** sin letras ni palabras.\n\nEjemplo válido: `150000` o `150.000`.\n\nInténtalo de nuevo:", parse_mode="Markdown")
+            bot.send_message(chat_id, "⚠️ El monto debe contener **únicamente números**. Inténtalo de nuevo:", parse_mode="Markdown")
             return
 
         nombre = state['nombre']
         datos = {"accion": "nuevo", "nombre": nombre, "monto": monto}
-        respuesta = requests.post(APPS_SCRIPT_URL, json=datos).json()
+        respuesta = enviar_a_sheets(datos)
         
         if respuesta.get("status") == "ok":
-            bot.send_message(chat_id, f"✅ Deudor *{nombre}* agregado con una deuda inicial de *{formato_clp(monto)}*.", parse_mode="Markdown", reply_markup=menu_principal())
+            bot.send_message(chat_id, f"✅ Deudor *{nombre}* agregado con deuda inicial de *{formato_clp(monto)}*.", parse_mode="Markdown", reply_markup=menu_principal())
         else:
             bot.send_message(chat_id, "⚠️ Ocurrió un error al guardar en la planilla.", reply_markup=menu_principal())
         user_states.pop(chat_id, None)
         return
 
-    # 2. Flujo Registrar Abono
     if step == 'abono_nombre':
         user_states[chat_id] = {'step': 'abono_monto', 'nombre': message.text.strip()}
-        bot.send_message(chat_id, f"Monto a abonar para *{message.text.strip()}* (ingresa solo el valor numérico, ej: 25000):", parse_mode="Markdown")
+        bot.send_message(chat_id, f"Monto a abonar para *{message.text.strip()}* (solo números, ej: 25000):", parse_mode="Markdown")
         return
 
     if step == 'abono_monto':
         monto = extraer_monto_valido(message.text)
-        
         if monto is None or monto <= 0:
-            bot.send_message(chat_id, "⚠️ **Entrada inválida.** El monto debe contener **únicamente números** sin letras ni palabras.\n\nEjemplo válido: `25000` o `25.000`.\n\nInténtalo de nuevo:", parse_mode="Markdown")
+            bot.send_message(chat_id, "⚠️ El monto debe contener **únicamente números**. Inténtalo de nuevo:", parse_mode="Markdown")
             return
 
         nombre = state['nombre']
         datos = {"accion": "abono", "nombre": nombre, "monto": monto}
-        respuesta = requests.post(APPS_SCRIPT_URL, json=datos).json()
+        respuesta = enviar_a_sheets(datos)
         
         if respuesta.get("status") == "ok":
             saldo_actual = respuesta.get("saldo")
@@ -159,27 +152,36 @@ def procesar_pasos(message):
         user_states.pop(chat_id, None)
         return
 
-    # 3. Flujo Consultar Saldo
     if step == 'saldo_nombre':
         nombre = message.text.strip()
         datos = {"accion": "saldo", "nombre": nombre}
-        respuesta = requests.post(APPS_SCRIPT_URL, json=datos).json()
+        respuesta = enviar_a_sheets(datos)
         
         if respuesta.get("status") == "ok":
+            nombre_real = respuesta.get("nombre")
             deuda = respuesta.get("deuda")
             abonos = respuesta.get("abonos")
             saldo = respuesta.get("saldo")
+            historial = respuesta.get("historial", [])
             
             texto = (
-                f"📊 *Estado de {nombre}*\n\n"
-                f"Deuda Inicial: {formato_clp(deuda)}\n"
-                f"Total Abonado: {formato_clp(abonos)}\n"
-                f"*Saldo Pendiente: {formato_clp(saldo)}*"
+                f"📊 *Estado de Cuenta: {nombre_real}*\n\n"
+                f"• Deuda Inicial: {formato_clp(deuda)}\n"
+                f"• Total Abonado: {formato_clp(abonos)}\n"
+                f"• *Saldo Pendiente: {formato_clp(saldo)}*\n\n"
+                f"📜 *Historial de Abonos:*"
             )
+            
+            if len(historial) == 0:
+                texto += "\n_No registra abonos previos._"
+            else:
+                for item in historial:
+                    texto += f"\n- {item['fecha']}: *{formato_clp(item['monto'])}*"
+
             bot.send_message(chat_id, texto, parse_mode="Markdown", reply_markup=menu_principal())
         else:
             bot.send_message(chat_id, f"❌ No se encontró al deudor *{nombre}*.", reply_markup=menu_principal())
         user_states.pop(chat_id, None)
 
-print("Iniciando bot con variables de entorno de Render...")
+print("Iniciando bot con historial de abonos...")
 bot.infinity_polling()
