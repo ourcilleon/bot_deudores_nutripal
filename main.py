@@ -1,4 +1,21 @@
 import os
+import threading
+from flask import Flask
+
+# Servidor web dummy para que Render detecte un puerto abierto
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot de Telegram activo."
+
+def run_http():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
+
+# Iniciar servidor web en segundo plano
+threading.Thread(target=run_http, daemon=True).start()
+import os
 import telebot
 from telebot import types
 import requests
