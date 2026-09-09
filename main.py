@@ -3,8 +3,8 @@ from telebot import types
 import requests
 
 # --- CONFIGURACIÓN ---
-TELEGRAM_TOKEN = 'TU_TOKEN_DE_TELEGRAM_AQUI'
-APPS_SCRIPT_URL = 'TU_URL_DE_APPS_SCRIPT_AQUI'
+TELEGRAM_TOKEN = '8861738923:AAH7catSwPZE30H2aEP4TlBbf_YKw6lLEqY'
+APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyBdAacHswKS-vuqUB8x7LeQPYQoYNuZCXeRom3AeoBsoZJLGtQLVUZ2RS_pz_NVV8iwg/exec'
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
