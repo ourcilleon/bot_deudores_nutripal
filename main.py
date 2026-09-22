@@ -57,6 +57,10 @@ def extraer_monto_valido(texto):
         return None
     return int(texto_limpio)
 
+def limpiar_nombre(texto):
+    # Elimina espacios dobles/múltiples intermediarios y espacios a los extremos
+    return " ".join(texto.strip().split())
+
 def menu_principal():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     btn_nuevo = types.KeyboardButton("➕ Agregar Deudor")
@@ -108,8 +112,9 @@ def procesar_pasos(message):
     step = state.get('step')
 
     if step == 'nuevo_nombre':
-        user_states[chat_id] = {'step': 'nuevo_monto', 'nombre': message.text.strip()}
-        bot.send_message(chat_id, f"Monto de la deuda inicial para *{message.text.strip()}* (solo números, ej: 150000):", parse_mode="Markdown")
+        nombre_limpio = limpiar_nombre(message.text)
+        user_states[chat_id] = {'step': 'nuevo_monto', 'nombre': nombre_limpio}
+        bot.send_message(chat_id, f"Monto de la deuda inicial para *{nombre_limpio}* (solo números, ej: 150000):", parse_mode="Markdown")
         return
 
     if step == 'nuevo_monto':
@@ -130,8 +135,9 @@ def procesar_pasos(message):
         return
 
     if step == 'abono_nombre':
-        user_states[chat_id] = {'step': 'abono_monto', 'nombre': message.text.strip()}
-        bot.send_message(chat_id, f"Monto a abonar para *{message.text.strip()}* (solo números, ej: 25000):", parse_mode="Markdown")
+        nombre_limpio = limpiar_nombre(message.text)
+        user_states[chat_id] = {'step': 'abono_monto', 'nombre': nombre_limpio}
+        bot.send_message(chat_id, f"Monto a abonar para *{nombre_limpio}* (solo números, ej: 25000):", parse_mode="Markdown")
         return
 
     if step == 'abono_monto':
@@ -153,7 +159,7 @@ def procesar_pasos(message):
         return
 
     if step == 'saldo_nombre':
-        nombre = message.text.strip()
+        nombre = limpiar_nombre(message.text)
         datos = {"accion": "saldo", "nombre": nombre}
         respuesta = enviar_a_sheets(datos)
         
