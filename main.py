@@ -67,7 +67,7 @@ def enviar_a_sheets(datos: dict) -> dict:
             APPS_SCRIPT_URL, 
             data=json.dumps(datos), 
             headers=headers, 
-            timeout=15,
+            timeout=45,
             allow_redirects=True
         )
         return respuesta.json()
