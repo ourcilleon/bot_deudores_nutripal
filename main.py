@@ -1,160 +1,246 @@
-// --- PEGA AQUÍ EL ID DE TU GOOGLE SHEET ---
-var SPREADSHEET_ID = "11GeK3nreRimIGO3Jtc4fbsW65p48B2ckkhC1yXOuxlg";
+"""Bot de Telegram para el registro de Deudores y Abonos - Bot Nutripal."""
 
-function normalizarTexto(texto) {
-  if (!texto) return "";
-  return texto
-    .toString()
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/\s+/g, "");
-}
+from __future__ import annotations
 
-function crearRespuestaJSON(objeto) {
-  return ContentService
-    .createTextOutput(JSON.stringify(objeto))
-    .setMimeType(ContentService.MimeType.JSON);
-}
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
+import logging
+import os
+import sys
+import threading
+from typing import Final
 
-function doPost(e) {
-  // 1. Obtener bloqueo exclusivo de script (espera hasta 10 segundos a que finalice la petición anterior)
-  var lock = LockService.getScriptLock();
-  try {
-    var success = lock.tryLock(10000); // Espera máximo 10s si otra petición está escribiendo
-    if (!success) {
-      return crearRespuestaJSON({
-        status: "error",
-        message: "El sistema está ocupado. Intenta de nuevo en unos segundos."
-      });
-    }
+import requests
+import telebot
+from telebot import types
 
-    if (!e || !e.postData || !e.postData.contents) {
-      return crearRespuestaJSON({ status: "error", message: "Cuerpo de solicitud vacío" });
-    }
+# --- LOGGING ---
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
 
-    var data = JSON.parse(e.postData.contents);
-    var accion = data.accion;
-    var nombreBuscado = data.nombre || "";
-    var monto = Number(data.monto) || 0;
 
-    // Conexión directa por ID (mucho más rápida y estable que getActiveSpreadsheet)
-    var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-    var sheetDeudores = ss.getSheetByName("Deudores") || ss.getSheets()[0];
-    var sheetAbonos = ss.getSheetByName("Abonos");
+# --- SERVIDOR HTTP NATIVO (LIBRERÍA ESTÁNDAR) ---
+class DummyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write("Bot Deudores Nutripal Activo".encode("utf-8"))
 
-    if (!sheetAbonos) {
-      sheetAbonos = ss.insertSheet("Abonos");
-      sheetAbonos.appendRow(["Fecha", "Nombre", "Monto"]);
-    }
+    def log_message(self, format, *args):
+        pass
 
-    var nombreBuscadoNorm = normalizarTexto(nombreBuscado);
 
-    // --- BÚSQUEDA DEL DEUDOR EN LA TABLA ---
-    var lastRowDeudores = sheetDeudores.getLastRow();
-    var datosDeudores = lastRowDeudores > 1 ? sheetDeudores.getRange(2, 1, lastRowDeudores - 1, 2).getValues() : [];
-    
-    var nombreReal = "";
-    var deudaInicial = 0;
-    var existeDeudor = false;
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), DummyHandler)
+    logger.info(f"Servidor HTTP dummy iniciado en el puerto {port}")
+    server.serve_forever()
 
-    for (var i = 0; i < datosDeudores.length; i++) {
-      if (normalizarTexto(datosDeudores[i][0]) === nombreBuscadoNorm) {
-        nombreReal = datosDeudores[i][0];
-        deudaInicial = Number(datosDeudores[i][1]) || 0;
-        existeDeudor = true;
-        break;
-      }
-    }
 
-    // --- 1. ACCIÓN: AGREGAR NUEVO DEUDOR ---
-    if (accion === "nuevo") {
-      if (existeDeudor) {
-        return crearRespuestaJSON({ status: "error", message: "El deudor ya existe" });
-      }
+# --- CONFIGURACIÓN Y VARIABLES DE ENTORNO ---
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '').strip()
+APPS_SCRIPT_URL = os.environ.get('APPS_SCRIPT_URL', '').strip()
 
-      sheetDeudores.appendRow([nombreBuscado, monto]);
-      SpreadsheetApp.flush(); // Forzar la escritura mientras mantenemos el Lock
+allowed_users_raw = os.environ.get('ALLOWED_USERS', '')
+ALLOWED_USERS: Final[list[int]] = [
+    int(uid.strip()) for uid in allowed_users_raw.split(',') if uid.strip().isdigit()
+]
 
-      return crearRespuestaJSON({ status: "ok" });
-    }
+if not TELEGRAM_TOKEN:
+    logger.error("❌ ERROR CRÍTICO: 'TELEGRAM_TOKEN' no configurado.")
+if not APPS_SCRIPT_URL:
+    logger.error("❌ ERROR CRÍTICO: 'APPS_SCRIPT_URL' no configurado.")
 
-    // Si la acción requiere que el deudor exista y no está:
-    if (!existeDeudor) {
-      return crearRespuestaJSON({ status: "error", message: "Deudor no encontrado" });
-    }
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
+user_states = {}
 
-    // --- 2. ACCIÓN: REGISTRAR ABONO ---
-    if (accion === "abono") {
-      var fechaHoy = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "dd/MM/yyyy HH:mm");
-      sheetAbonos.appendRow([fechaHoy, nombreReal, monto]);
-      SpreadsheetApp.flush();
 
-      var totalAbonos = obtenerTotalAbonado(sheetAbonos, nombreBuscadoNorm);
-      var saldoPendiente = deudaInicial - totalAbonos;
+# --- FUNCIONES AUXILIARES ---
+def enviar_a_sheets(datos: dict) -> dict:
+    headers = {'Content-Type': 'application/json'}
+    try:
+        respuesta = requests.post(
+            APPS_SCRIPT_URL, 
+            data=json.dumps(datos), 
+            headers=headers, 
+            timeout=45,
+            allow_redirects=True
+        )
+        logger.info(f"Respuesta HTTP {respuesta.status_code}: {respuesta.text}")
+        return respuesta.json()
+    except Exception as e:
+        logger.error(f"❌ Error al conectar con Google Sheets: {e}")
+        return {"status": "error", "message": str(e)}
 
-      return crearRespuestaJSON({
-        status: "ok",
-        nombre: nombreReal,
-        saldo: saldoPendiente
-      });
-    }
 
-    // --- 3. ACCIÓN: CONSULTAR SALDO E HISTORIAL ---
-    if (accion === "saldo") {
-      var lastRowAbonos = sheetAbonos.getLastRow();
-      var datosAbonos = lastRowAbonos > 1 ? sheetAbonos.getRange(2, 1, lastRowAbonos - 1, 3).getValues() : [];
+def formato_clp(monto: int | float) -> str:
+    return f"${int(monto):,}".replace(",", ".")
 
-      var historial = [];
-      var totalAbonos = 0;
 
-      for (var j = 0; j < datosAbonos.length; j++) {
-        var fechaAbono = datosAbonos[j][0];
-        var nombreAbono = datosAbonos[j][1];
-        var montoAbono = Number(datosAbonos[j][2]) || 0;
+def extraer_monto_valido(texto: str) -> int | None:
+    texto_limpio = texto.strip().replace(".", "").replace(",", "").replace("$", "")
+    if not texto_limpio.isdigit():
+        return None
+    return int(texto_limpio)
 
-        if (normalizarTexto(nombreAbono) === nombreBuscadoNorm) {
-          totalAbonos += montoAbono;
-          
-          var fechaTexto = (fechaAbono instanceof Date) 
-            ? Utilities.formatDate(fechaAbono, Session.getScriptTimeZone(), "dd/MM/yyyy") 
-            : fechaAbono;
 
-          historial.push({ fecha: fechaTexto, monto: montoAbono });
-        }
-      }
+def limpiar_nombre(texto: str) -> str:
+    return " ".join(texto.strip().split())
 
-      return crearRespuestaJSON({
-        status: "ok",
-        nombre: nombreReal,
-        deuda: deudaInicial,
-        abonos: totalAbonos,
-        saldo: deudaInicial - totalAbonos,
-        historial: historial
-      });
-    }
 
-    return crearRespuestaJSON({ status: "error", message: "Acción no reconocida" });
+def menu_principal() -> types.ReplyKeyboardMarkup:
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    btn_nuevo = types.KeyboardButton("➕ Agregar Deudor")
+    btn_abono = types.KeyboardButton("💸 Registrar Abono")
+    btn_saldo = types.KeyboardButton("🔍 Consultar Saldo")
+    btn_cancelar = types.KeyboardButton("❌ Cancelar")
+    markup.add(btn_nuevo, btn_abono, btn_saldo, btn_cancelar)
+    return markup
 
-  } catch (err) {
-    return crearRespuestaJSON({ status: "error", message: err.toString() });
-  } finally {
-    // Liberar siempre el bloqueo al finalizar la solicitud
-    lock.releaseLock();
-  }
-}
 
-function obtenerTotalAbonado(sheetAbonos, nombreNorm) {
-  var lastRow = sheetAbonos.getLastRow();
-  if (lastRow <= 1) return 0;
+# --- HANDLERS DE TELEGRAM ---
+@bot.message_handler(func=lambda message: len(ALLOWED_USERS) > 0 and message.from_user.id not in ALLOWED_USERS)
+def acceso_denegado(message):
+    bot.reply_to(message, "⛔ *Acceso denegado.* Este bot es privado.", parse_mode="Markdown")
 
-  var datos = sheetAbonos.getRange(2, 1, lastRow - 1, 3).getValues();
-  var total = 0;
 
-  for (var i = 0; i < datos.length; i++) {
-    if (normalizarTexto(datos[i][1]) === nombreNorm) {
-      total += Number(datos[i][2]) || 0;
-    }
-  }
-  return total;
-}
+@bot.message_handler(commands=['start', 'help'])
+def send_welcome(message):
+    user_states.pop(message.chat.id, None)
+    texto = (
+        "🤖 *Bot de Registro de Deudores*\n\n"
+        "Selecciona una opción del menú inferior para comenzar:"
+    )
+    bot.send_message(message.chat.id, texto, reply_markup=menu_principal(), parse_mode="Markdown")
+
+
+@bot.message_handler(func=lambda m: m.text == "❌ Cancelar")
+def cancelar(message):
+    user_states.pop(message.chat.id, None)
+    bot.send_message(message.chat.id, "Operación cancelada. ¿Qué deseas hacer?", reply_markup=menu_principal())
+
+
+# --- PASO 1: INICIO DE FLUJOS ---
+@bot.message_handler(func=lambda m: m.text == "➕ Agregar Deudor" or m.text == "/nuevo")
+def inicio_nuevo(message):
+    user_states[message.chat.id] = {'step': 'nuevo_nombre'}
+    bot.send_message(message.chat.id, "📝 Ingresa el *Nombre y Apellido* del nuevo deudor:", parse_mode="Markdown")
+
+
+@bot.message_handler(func=lambda m: m.text == "💸 Registrar Abono" or m.text == "/abono")
+def inicio_abono(message):
+    user_states[message.chat.id] = {'step': 'abono_nombre'}
+    bot.send_message(message.chat.id, "💸 Ingresa el *Nombre y Apellido* del deudor que realizará el abono:", parse_mode="Markdown")
+
+
+@bot.message_handler(func=lambda m: m.text == "🔍 Consultar Saldo" or m.text == "/saldo")
+def inicio_saldo(message):
+    user_states[message.chat.id] = {'step': 'saldo_nombre'}
+    bot.send_message(message.chat.id, "🔍 Ingresa el *Nombre y Apellido* del deudor a consultar:", parse_mode="Markdown")
+
+
+# --- PASO 2: PROCESAMIENTO ---
+@bot.message_handler(func=lambda message: message.chat.id in user_states)
+def procesar_pasos(message):
+    chat_id = message.chat.id
+    state = user_states.get(chat_id, {})
+    step = state.get('step')
+
+    if step == 'nuevo_nombre':
+        nombre_limpio = limpiar_nombre(message.text)
+        user_states[chat_id] = {'step': 'nuevo_monto', 'nombre': nombre_limpio}
+        bot.send_message(chat_id, f"Monto de la deuda inicial para *{nombre_limpio}* (solo números, ej: 150000):", parse_mode="Markdown")
+        return
+
+    if step == 'nuevo_monto':
+        monto = extraer_monto_valido(message.text)
+        if monto is None or monto <= 0:
+            bot.send_message(chat_id, "⚠️ El monto debe contener **únicamente números**. Inténtalo de nuevo:", parse_mode="Markdown")
+            return
+
+        nombre = state['nombre']
+        datos = {"accion": "nuevo", "nombre": nombre, "monto": monto}
+        respuesta = enviar_a_sheets(datos)
+        
+        if respuesta.get("status") == "ok":
+            bot.send_message(chat_id, f"✅ Deudor *{nombre}* agregado con deuda inicial de *{formato_clp(monto)}*.", parse_mode="Markdown", reply_markup=menu_principal())
+        else:
+            bot.send_message(chat_id, "⚠️ Ocurrió un error al guardar en la planilla.", reply_markup=menu_principal())
+        user_states.pop(chat_id, None)
+        return
+
+    if step == 'abono_nombre':
+        nombre_limpio = limpiar_nombre(message.text)
+        user_states[chat_id] = {'step': 'abono_monto', 'nombre': nombre_limpio}
+        bot.send_message(chat_id, f"Monto a abonar para *{nombre_limpio}* (solo números, ej: 25000):", parse_mode="Markdown")
+        return
+
+    if step == 'abono_monto':
+        monto = extraer_monto_valido(message.text)
+        if monto is None or monto <= 0:
+            bot.send_message(chat_id, "⚠️ El monto debe contener **únicamente números**. Inténtalo de nuevo:", parse_mode="Markdown")
+            return
+
+        nombre = state['nombre']
+        datos = {"accion": "abono", "nombre": nombre, "monto": monto}
+        respuesta = enviar_a_sheets(datos)
+        
+        if respuesta.get("status") == "ok":
+            saldo_actual = respuesta.get("saldo")
+            bot.send_message(chat_id, f"✅ Abono de *{formato_clp(monto)}* registrado a *{nombre}*.\n\nSaldo pendiente: *{formato_clp(saldo_actual)}*", parse_mode="Markdown", reply_markup=menu_principal())
+        else:
+            bot.send_message(chat_id, f"❌ No se encontró al deudor *{nombre}* en la planilla.", reply_markup=menu_principal())
+        user_states.pop(chat_id, None)
+        return
+
+    if step == 'saldo_nombre':
+        nombre = limpiar_nombre(message.text)
+        datos = {"accion": "saldo", "nombre": nombre}
+        respuesta = enviar_a_sheets(datos)
+        
+        if respuesta.get("status") == "ok":
+            nombre_real = respuesta.get("nombre")
+            deuda = respuesta.get("deuda")
+            abonos = respuesta.get("abonos")
+            saldo = respuesta.get("saldo")
+            historial = respuesta.get("historial", [])
+            
+            texto = (
+                f"📊 *Estado de Cuenta: {nombre_real}*\n\n"
+                f"• Deuda Inicial: {formato_clp(deuda)}\n"
+                f"• Total Abonado: {formato_clp(abonos)}\n"
+                f"• *Saldo Pendiente: {formato_clp(saldo)}*\n\n"
+                f"📜 *Historial de Abonos:*"
+            )
+            
+            if len(historial) == 0:
+                texto += "\n_No registra abonos previos._"
+            else:
+                for item in historial:
+                    texto += f"\n- {item['fecha']}: *{formato_clp(item['monto'])}*"
+
+            bot.send_message(chat_id, texto, parse_mode="Markdown", reply_markup=menu_principal())
+        else:
+            bot.send_message(chat_id, f"❌ No se encontró al deudor *{nombre}*.", reply_markup=menu_principal())
+        user_states.pop(chat_id, None)
+
+
+# --- MAIN ---
+def main() -> None:
+    if not TELEGRAM_TOKEN:
+        logger.error("Falta la variable TELEGRAM_TOKEN.")
+        sys.exit(2)
+
+    # Iniciar servidor HTTP en un hilo secundario
+    threading.Thread(target=run_dummy_server, daemon=True).start()
+
+    logger.info("Iniciando Bot de Deudores Nutripal en modo Polling...")
+    bot.infinity_polling()
+
+
+if __name__ == "__main__":
+    main()
