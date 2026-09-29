@@ -103,7 +103,7 @@ def menu_principal() -> types.ReplyKeyboardMarkup:
     return markup
 
 
-# --- HANDLERS DE TELEGRAM ---
+# --- HANDLERS DE SEGURIDAD Y CONTROL ---
 @bot.message_handler(func=lambda message: len(ALLOWED_USERS) > 0 and message.from_user.id not in ALLOWED_USERS)
 def acceso_denegado(message):
     bot.reply_to(message, "⛔ *Acceso denegado.* Este bot es privado.", parse_mode="Markdown")
@@ -125,37 +125,40 @@ def cancelar(message):
     bot.send_message(message.chat.id, "Operación cancelada. ¿Qué deseas hacer?", reply_markup=menu_principal())
 
 
-# --- PASO 1: INICIO DE FLUJOS ---
-@bot.message_handler(func=lambda m: m.text in ["👤 Nuevo Deudor", "➕ Agregar Deudor", "➕ Agregar Deudor", "/nuevo", "/masdeuda"])
-def inicio_deuda(message):
-    if message.text in ["👤 Nuevo Deudor", "/nuevo"]:
-        user_states[message.chat.id] = {'step': 'nuevo_nombre'}
-        bot.send_message(message.chat.id, "📝 Ingresa el *Nombre y Apellido* del nuevo deudor:", parse_mode="Markdown")
-    else:
-        user_states[message.chat.id] = {'step': 'agregar_deuda_nombre'}
-        bot.send_message(message.chat.id, "➕ Ingresa el *Nombre y Apellido* del deudor al que sumarás deuda:", parse_mode="Markdown")
+# --- PASO 1: INICIO DE FLUJOS (COMANDOS Y BOTONES DEL MENÚ) ---
+
+@bot.message_handler(func=lambda m: m.text in ["👤 Nuevo Deudor", "/nuevo"])
+def inicio_nuevo_deudor(message):
+    user_states[message.chat.id] = {'step': 'nuevo_nombre'}
+    bot.send_message(message.chat.id, "📝 Ingresa el *Nombre y Apellido* del nuevo deudor:", parse_mode="Markdown")
 
 
-@bot.message_handler(func=lambda m: m.text == "💸 Registrar Abono" or m.text == "/abono")
+@bot.message_handler(func=lambda m: m.text in ["➕ Agregar Deuda", "/masdeuda"])
+def inicio_agregar_deuda(message):
+    user_states[message.chat.id] = {'step': 'agregar_deuda_nombre'}
+    bot.send_message(message.chat.id, "➕ Ingresa el *Nombre y Apellido* del deudor al que sumarás deuda:", parse_mode="Markdown")
+
+
+@bot.message_handler(func=lambda m: m.text in ["💸 Registrar Abono", "/abono"])
 def inicio_abono(message):
     user_states[message.chat.id] = {'step': 'abono_nombre'}
     bot.send_message(message.chat.id, "💸 Ingresa el *Nombre y Apellido* del deudor que realizará el abono:", parse_mode="Markdown")
 
 
-@bot.message_handler(func=lambda m: m.text == "🔍 Consultar Saldo" or m.text == "/saldo")
+@bot.message_handler(func=lambda m: m.text in ["🔍 Consultar Saldo", "/saldo"])
 def inicio_saldo(message):
     user_states[message.chat.id] = {'step': 'saldo_nombre'}
     bot.send_message(message.chat.id, "🔍 Ingresa el *Nombre y Apellido* del deudor a consultar:", parse_mode="Markdown")
 
 
-# --- PASO 2: PROCESAMIENTO ---
+# --- PASO 2: PROCESAMIENTO DE PASOS INTERMEDIOS ---
 @bot.message_handler(func=lambda message: message.chat.id in user_states)
 def procesar_pasos(message):
     chat_id = message.chat.id
     state = user_states.get(chat_id, {})
     step = state.get('step')
 
-    # CREAR NUEVO DEUDOR
+    # 1. CREAR NUEVO DEUDOR
     if step == 'nuevo_nombre':
         nombre_limpio = limpiar_nombre(message.text)
         user_states[chat_id] = {'step': 'nuevo_monto', 'nombre': nombre_limpio}
@@ -179,7 +182,7 @@ def procesar_pasos(message):
         user_states.pop(chat_id, None)
         return
 
-    # AGREGAR MÁS DEUDA
+    # 2. AGREGAR MÁS DEUDA
     if step == 'agregar_deuda_nombre':
         nombre_limpio = limpiar_nombre(message.text)
         user_states[chat_id] = {'step': 'agregar_deuda_monto', 'nombre': nombre_limpio}
@@ -222,7 +225,7 @@ def procesar_pasos(message):
         user_states.pop(chat_id, None)
         return
 
-    # REGISTRAR ABONO
+    # 3. REGISTRAR ABONO
     if step == 'abono_nombre':
         nombre_limpio = limpiar_nombre(message.text)
         user_states[chat_id] = {'step': 'abono_monto', 'nombre': nombre_limpio}
@@ -247,7 +250,7 @@ def procesar_pasos(message):
         user_states.pop(chat_id, None)
         return
 
-    # CONSULTAR SALDO
+    # 4. CONSULTAR SALDO
     if step == 'saldo_nombre':
         nombre = limpiar_nombre(message.text)
         datos = {"accion": "saldo", "nombre": nombre}
