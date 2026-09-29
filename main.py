@@ -94,11 +94,12 @@ def limpiar_nombre(texto: str) -> str:
 
 def menu_principal() -> types.ReplyKeyboardMarkup:
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    btn_nuevo = types.KeyboardButton("➕ Agregar Deudor")
+    btn_nuevo = types.KeyboardButton("👤 Nuevo Deudor")
+    btn_agregar_deuda = types.KeyboardButton("➕ Agregar Deuda")
     btn_abono = types.KeyboardButton("💸 Registrar Abono")
     btn_saldo = types.KeyboardButton("🔍 Consultar Saldo")
     btn_cancelar = types.KeyboardButton("❌ Cancelar")
-    markup.add(btn_nuevo, btn_abono, btn_saldo, btn_cancelar)
+    markup.add(btn_nuevo, btn_agregar_deuda, btn_abono, btn_saldo, btn_cancelar)
     return markup
 
 
@@ -112,7 +113,7 @@ def acceso_denegado(message):
 def send_welcome(message):
     user_states.pop(message.chat.id, None)
     texto = (
-        "🤖 *Bot de Registro de Deudores*\n\n"
+        "🤖 *Bot de Registro de Deudores Nutripal*\n\n"
         "Selecciona una opción del menú inferior para comenzar:"
     )
     bot.send_message(message.chat.id, texto, reply_markup=menu_principal(), parse_mode="Markdown")
@@ -125,10 +126,14 @@ def cancelar(message):
 
 
 # --- PASO 1: INICIO DE FLUJOS ---
-@bot.message_handler(func=lambda m: m.text == "➕ Agregar Deudor" or m.text == "/nuevo")
-def inicio_nuevo(message):
-    user_states[message.chat.id] = {'step': 'nuevo_nombre'}
-    bot.send_message(message.chat.id, "📝 Ingresa el *Nombre y Apellido* del nuevo deudor:", parse_mode="Markdown")
+@bot.message_handler(func=lambda m: m.text in ["👤 Nuevo Deudor", "➕ Agregar Deudor", "➕ Agregar Deudor", "/nuevo", "/masdeuda"])
+def inicio_deuda(message):
+    if message.text in ["👤 Nuevo Deudor", "/nuevo"]:
+        user_states[message.chat.id] = {'step': 'nuevo_nombre'}
+        bot.send_message(message.chat.id, "📝 Ingresa el *Nombre y Apellido* del nuevo deudor:", parse_mode="Markdown")
+    else:
+        user_states[message.chat.id] = {'step': 'agregar_deuda_nombre'}
+        bot.send_message(message.chat.id, "➕ Ingresa el *Nombre y Apellido* del deudor al que sumarás deuda:", parse_mode="Markdown")
 
 
 @bot.message_handler(func=lambda m: m.text == "💸 Registrar Abono" or m.text == "/abono")
@@ -150,6 +155,7 @@ def procesar_pasos(message):
     state = user_states.get(chat_id, {})
     step = state.get('step')
 
+    # CREAR NUEVO DEUDOR
     if step == 'nuevo_nombre':
         nombre_limpio = limpiar_nombre(message.text)
         user_states[chat_id] = {'step': 'nuevo_monto', 'nombre': nombre_limpio}
@@ -173,6 +179,50 @@ def procesar_pasos(message):
         user_states.pop(chat_id, None)
         return
 
+    # AGREGAR MÁS DEUDA
+    if step == 'agregar_deuda_nombre':
+        nombre_limpio = limpiar_nombre(message.text)
+        user_states[chat_id] = {'step': 'agregar_deuda_monto', 'nombre': nombre_limpio}
+        bot.send_message(chat_id, f"Monto de la **deuda adicional** a sumar para *{nombre_limpio}* (solo números, ej: 30000):", parse_mode="Markdown")
+        return
+
+    if step == 'agregar_deuda_monto':
+        monto = extraer_monto_valido(message.text)
+        if monto is None or monto <= 0:
+            bot.send_message(chat_id, "⚠️ El monto debe contener **únicamente números**. Inténtalo de nuevo:", parse_mode="Markdown")
+            return
+
+        nombre = state['nombre']
+        datos = {"accion": "agregar_deuda", "nombre": nombre, "monto": monto}
+        respuesta = enviar_a_sheets(datos)
+        
+        if respuesta.get("status") == "ok":
+            nombre_real = respuesta.get("nombre", nombre)
+            deuda_inicial = respuesta.get("deuda_inicial", 0)
+            deudas_agregadas = respuesta.get("deudas_agregadas", [])
+            abonos = respuesta.get("abonos", 0)
+            saldo = respuesta.get("saldo", 0)
+
+            texto = (
+                f"✅ *Deuda registrada para {nombre_real}*\n\n"
+                f"• Deuda Inicial: {formato_clp(deuda_inicial)}\n"
+            )
+
+            for idx, d in enumerate(deudas_agregadas, start=1):
+                texto += f"• Deuda Agregada {idx}: {formato_clp(d['monto'])}\n"
+
+            texto += (
+                f"• Total Abonado: {formato_clp(abonos)}\n"
+                f"• *Saldo Pendiente: {formato_clp(saldo)}*"
+            )
+
+            bot.send_message(chat_id, texto, parse_mode="Markdown", reply_markup=menu_principal())
+        else:
+            bot.send_message(chat_id, f"❌ No se encontró al deudor *{nombre}*.", reply_markup=menu_principal())
+        user_states.pop(chat_id, None)
+        return
+
+    # REGISTRAR ABONO
     if step == 'abono_nombre':
         nombre_limpio = limpiar_nombre(message.text)
         user_states[chat_id] = {'step': 'abono_monto', 'nombre': nombre_limpio}
@@ -197,6 +247,7 @@ def procesar_pasos(message):
         user_states.pop(chat_id, None)
         return
 
+    # CONSULTAR SALDO
     if step == 'saldo_nombre':
         nombre = limpiar_nombre(message.text)
         datos = {"accion": "saldo", "nombre": nombre}
@@ -204,14 +255,21 @@ def procesar_pasos(message):
         
         if respuesta.get("status") == "ok":
             nombre_real = respuesta.get("nombre")
-            deuda = respuesta.get("deuda")
-            abonos = respuesta.get("abonos")
-            saldo = respuesta.get("saldo")
+            deuda_inicial = respuesta.get("deuda_inicial", 0)
+            deudas_agregadas = respuesta.get("deudas_agregadas", [])
+            abonos = respuesta.get("abonos", 0)
+            saldo = respuesta.get("saldo", 0)
             historial = respuesta.get("historial", [])
             
             texto = (
                 f"📊 *Estado de Cuenta: {nombre_real}*\n\n"
-                f"• Deuda Inicial: {formato_clp(deuda)}\n"
+                f"• Deuda Inicial: {formato_clp(deuda_inicial)}\n"
+            )
+
+            for idx, d in enumerate(deudas_agregadas, start=1):
+                texto += f"• Deuda Agregada {idx}: {formato_clp(d['monto'])}\n"
+
+            texto += (
                 f"• Total Abonado: {formato_clp(abonos)}\n"
                 f"• *Saldo Pendiente: {formato_clp(saldo)}*\n\n"
                 f"📜 *Historial de Abonos:*"
